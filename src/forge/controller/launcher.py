@@ -148,6 +148,7 @@ class Slurmlauncher(BaseLauncher):
         server_config = Config(
             scheduler="slurm",
             appdef=appdef,
+            scheduler_args={"srun_args": ["--exclusive"]},
             workspace=monarch.tools.config.workspace.Workspace(dirs=[temp_workspace]),
         )
         server_info = await commands.get_or_create(

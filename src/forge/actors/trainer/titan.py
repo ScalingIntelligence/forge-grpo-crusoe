@@ -165,6 +165,21 @@ class TitanTrainer(ForgeActor):
         torch.distributed.all_reduce(loss)
 
         t.step("forward_backward")
+        
+        # Mean per-parameter gradient norm before clipping
+        mean_grad_norm = torch.mean(torch.stack([
+            p.grad.norm()
+            for p in self.engine.model_parts[0].parameters() 
+            if p.grad is not None
+        ]))
+        record_metric("rl_trainer/grad_norm_mean", mean_grad_norm.item(), Reduce.MEAN)
+
+        # Global gradient norm with clipping
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.engine.model_parts[0].parameters(),
+            self.training.max_norm
+        )
+        record_metric("rl_trainer/grad_norm", grad_norm.item(), Reduce.MEAN)
 
         current_lr = self.engine.lr_schedulers.schedulers[0].get_last_lr()[0]
         record_metric("rl_trainer/learning_rate", current_lr, Reduce.MIN)

@@ -203,26 +203,23 @@ class ComputeAdvantages(ForgeActor):
 class DatasetActor(ForgeActor):
     """Actor wrapper for HuggingFace dataset to provide async interface."""
 
-    path: str = "openai/gsm8k" # will be overridden by Polaris Dataset
-    revision: str = "main" # will be overridden by Polaris Dataset
-    data_split: str = "train" 
+    path: str = "openai/gsm8k"
+    revision: str = "main"
+    data_split: str = "train"
     streaming: bool = True
-    model: str = "Qwen/Qwen3-1.7B" # will be overriden
+    model: str = "Qwen/Qwen3-1.7B"
 
     @endpoint
     async def setup(self):
         self._tokenizer = get_tokenizer(self.model)
         self._epoch = 0
 
-
-        def polaris_transform(sample):
+        def gsm8k_transform(sample):
             system_prompt = """
-            You are a math expert and your job is to solve the following problem.
-            Let's think step by step and put all your scratchpad work between <think> and </think> tags.
+            Put all your scratchpad work between <think> and </think> tags.
             Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
-            Please output your answer in latex if it is an expression.
             """
-            request: str = sample["problem"]
+            request: str = sample["question"]
             as_chat = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": request},
@@ -233,37 +230,13 @@ class DatasetActor(ForgeActor):
                 add_generation_prompt=True,
             )
             target: str = sample["answer"]
-            # formatted_target = target.split("#### ")[1]
-            return {"request": formatted_request, "target": target}
-
-
-
-
-
-
-        # def gsm8k_transform(sample):
-        #     system_prompt = """
-        #     Put all your scratchpad work between <think> and </think> tags.
-        #     Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
-        #     """
-        #     request: str = sample["question"]
-        #     as_chat = [
-        #         {"role": "system", "content": system_prompt},
-        #         {"role": "user", "content": request},
-        #     ]
-        #     formatted_request = self._tokenizer.apply_chat_template(
-        #         as_chat,
-        #         tokenize=False,
-        #         add_generation_prompt=True,
-        #     )
-        #     target: str = sample["answer"]
-        #     formatted_target = target.split("#### ")[1]
-        #     return {"request": formatted_request, "target": formatted_target}
+            formatted_target = target.split("#### ")[1]
+            return {"request": formatted_request, "target": formatted_target}
 
         self._base_dataset = load_dataset(
             self.path, self.revision, split=self.data_split, streaming=self.streaming
         )
-        self._base_dataset = self._base_dataset.map(polaris_transform)
+        self._base_dataset = self._base_dataset.map(gsm8k_transform)
         self._base_dataset = self._base_dataset.shuffle()
         self._iterator = iter(self._base_dataset)
 
