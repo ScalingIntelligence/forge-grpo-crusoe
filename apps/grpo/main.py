@@ -218,9 +218,9 @@ class DatasetActor(ForgeActor):
         def polaris_transform(sample):
             system_prompt = """
             You are a math expert and your job is to solve the following problem.
-            Let's think step by step and put all your scratchpad work between <think> and </think> tags.
+            Put all your scratchpad work between <think> and </think> tags.
             Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
-            Please output your answer in latex if it is an expression.
+            Please output your answer in latex, without dollar signs, if it is an expression.
             """
             request: str = sample["problem"]
             as_chat = [
@@ -236,29 +236,6 @@ class DatasetActor(ForgeActor):
             # formatted_target = target.split("#### ")[1]
             return {"request": formatted_request, "target": target}
 
-
-
-
-
-
-        # def gsm8k_transform(sample):
-        #     system_prompt = """
-        #     Put all your scratchpad work between <think> and </think> tags.
-        #     Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
-        #     """
-        #     request: str = sample["question"]
-        #     as_chat = [
-        #         {"role": "system", "content": system_prompt},
-        #         {"role": "user", "content": request},
-        #     ]
-        #     formatted_request = self._tokenizer.apply_chat_template(
-        #         as_chat,
-        #         tokenize=False,
-        #         add_generation_prompt=True,
-        #     )
-        #     target: str = sample["answer"]
-        #     formatted_target = target.split("#### ")[1]
-        #     return {"request": formatted_request, "target": formatted_target}
 
         self._base_dataset = load_dataset(
             self.path, self.revision, split=self.data_split, streaming=self.streaming
@@ -279,6 +256,86 @@ class DatasetActor(ForgeActor):
                 Reduce.MEAN,
             )
             record_metric("dataset/sample/current_epoch", self._epoch, Reduce.MAX)
+
+            return sample
+        except StopIteration:
+            # Restart iterator for next epoch with reshuffling
+            self._epoch += 1
+            print(
+                f"Dataset epoch {self._epoch - 1} completed. Starting epoch {self._epoch}"
+            )
+            self._base_dataset.set_epoch(self._epoch)
+            self._iterator = iter(self._base_dataset)
+            return next(self._iterator)
+
+    @endpoint
+    async def pad_token(self):
+        # Use pad_token_id if available, otherwise use eos_token_id
+        # Llama models don't have a pad token by default
+        if self._tokenizer.pad_token_id is not None:
+            return self._tokenizer.pad_token_id
+        else:
+            return self._tokenizer.eos_token_id
+
+
+@dataclass
+class EvalDatasetActor(ForgeActor):
+    """Actor wrapper for HuggingFace dataset to provide async interface."""
+
+    path: str = "openai/gsm8k" # will be overridden by Polaris Dataset
+    revision: str = "main" # will be overridden by Polaris Dataset
+    data_split: str = "train" 
+    streaming: bool = True
+    model: str = "Qwen/Qwen3-1.7B" # will be overriden
+    num_steps_until_eval: int = 1000
+
+    @endpoint
+    async def setup(self):
+        self._tokenizer = get_tokenizer(self.model)
+        self._epoch = 0
+
+
+        def aime_transform(sample):
+            system_prompt = """
+            You are a math expert and your job is to solve the following problem.
+            Put all your scratchpad work between <think> and </think> tags.
+            Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
+            Please output your answer in latex, without dollar signs, if it is an expression.
+            """
+            request: str = sample["question"]
+            as_chat = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request},
+            ]
+            formatted_request = self._tokenizer.apply_chat_template(
+                as_chat,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            target: str = sample["answer"]
+            # formatted_target = target.split("#### ")[1]
+            return {"request": formatted_request, "target": target}
+
+
+        self._base_dataset = load_dataset(
+            self.path, self.revision, split=self.data_split, streaming=self.streaming
+        )
+        self._base_dataset = self._base_dataset.map(aime_transform)
+        self._base_dataset = self._base_dataset.shuffle()
+        self._iterator = iter(self._base_dataset)
+
+    @endpoint
+    async def sample(self) -> dict[str, str] | None:
+        try:
+            sample = next(self._iterator)
+
+            record_metric("eval_dataset/sample/count_samples_generated", 1, Reduce.SUM)
+            record_metric(
+                "eval_dataset/sample/avg_sample_len",
+                len(sample["request"]),
+                Reduce.MEAN,
+            )
+            record_metric("eval_dataset/sample/current_epoch", self._epoch, Reduce.MAX)
 
             return sample
         except StopIteration:
@@ -341,6 +398,7 @@ async def main(cfg: DictConfig):
 
     (
         dataloader,
+        eval_dataloader,
         policy,
         trainer,
         replay_buffer,
@@ -349,6 +407,7 @@ async def main(cfg: DictConfig):
         reward_actor,
     ) = await asyncio.gather(
         DatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.dataset),
+        EvalDatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.eval_dataset), # eval dataset
         Policy.options(**cfg.services.policy).as_service(**cfg.policy),
         TitanTrainer.options(**cfg.actors.trainer).as_actor(
             **cfg.trainer, loss=simple_grpo_loss
@@ -396,9 +455,18 @@ async def main(cfg: DictConfig):
 
             t.step("data_loading")
 
+
             prompt, target = sample["request"], sample["target"]
             responses: list[Completion] = await policy.generate.route(prompt)
             t.step("policy_generation")
+
+            # DEBUG: print out sample model generations
+            # print("\n--- Rollout Debug ---")
+            # print(f"Prompt:\n{prompt}")
+            # for i, r in enumerate(responses):
+            #     if i == 0:
+            #         print(f"\nResponse {i+1}:\n{r.text}")
+            # print("--------------------\n")
 
             # Construct episodes and calculate rewards
             episodes = []
@@ -453,6 +521,31 @@ async def main(cfg: DictConfig):
         while max_steps == -1 or training_step < max_steps:
             # Restart tracer when needed (initial start or after completing a training step)
             # Otherwise, we cannot measure time waiting for buffer
+
+            # TODO: implement eval loop during training
+            if training_step % cfg.eval_dataset.num_steps_until_eval == 0:
+                pad_id = await eval_dataloader.pad_token.call_one()
+                sample = await eval_dataloader.sample.call_one()
+                if sample is None:
+                    print("Eval Dataloader is empty, stopping evaluation")
+                    return
+                prompt, target = sample["request"], sample["target"]
+                responses: list[Completion] = await policy.generate.route(prompt)
+
+                # EVAL: print out sample model generations
+                print("\n--- Rollout Debug ---")
+                print(f"Prompt:\n{prompt}")
+                for i, r in enumerate(responses):
+                    if i == 0:
+                        print(f"\nResponse {i+1}:\n{r.text}")
+                print("--------------------\n")
+
+                eval_reward = await reward_actor.evaluate_response.route(
+                    prompt=prompt, response=responses[0].text, target=target
+                )
+                print(f"Eval Reward: {eval_reward}")
+
+
             if restart_tracer:
                 t = Tracer("main_perf/continuous_training")
                 t.start()

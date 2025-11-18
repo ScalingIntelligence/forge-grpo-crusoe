@@ -5,7 +5,7 @@
 group_size: 8
 local_batch_size: 12 # per-device batch size
 max_req_tokens: 1024
-max_res_tokens: 2048
+max_res_tokens: 8192
 model: "Qwen/Qwen3-8B"
 off_by_n: 1 # Off by one by default
 
@@ -29,6 +29,16 @@ dataset:
   streaming: true
   model: ${model}
 
+# Eval dataset configuration
+eval_dataset:
+  path: "opencompass/AIME2025"
+  revision: "AIME2025-I"
+  data_split: "test"
+  streaming: false
+  model: ${model}
+  num_steps_until_eval: 50
+
+
 # Policy configuration
 policy:
   engine_args:  # https://docs.vllm.ai/en/v0.10.0/api/vllm/engine/arg_utils.html#vllm.engine.arg_utils.EngineArgs
@@ -36,6 +46,7 @@ policy:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
     enforce_eager: false
+    gpu_memory_utilization: 0.4
   sampling_params:  # https://docs.vllm.ai/en/v0.10.0/api/vllm/sampling_params.html#vllm.sampling_params.SamplingParams
     n: ${group_size}
     max_tokens: ${max_res_tokens}
