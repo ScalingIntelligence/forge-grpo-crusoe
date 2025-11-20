@@ -524,6 +524,7 @@ async def main(cfg: DictConfig):
 
             # TODO: implement eval loop during training
             if training_step % cfg.eval_dataset.num_steps_until_eval == 0:
+                print(f"On step {training_step}, evaluation run every {cfg.eval_dataset.num_steps_until_eval} steps, running evaluation...")
                 pad_id = await eval_dataloader.pad_token.call_one()
                 sample = await eval_dataloader.sample.call_one()
                 if sample is None:
