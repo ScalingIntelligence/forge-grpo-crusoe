@@ -358,14 +358,52 @@ class EvalDatasetActor(ForgeActor):
 
             return sample
         except StopIteration:
-            # Restart iterator for next epoch with reshuffling
+            # Restart iterator for next epoch with reshuffling / epoch control
             self._epoch += 1
             print(
                 f"Dataset epoch {self._epoch - 1} completed. Starting epoch {self._epoch}"
             )
-            self._base_dataset.set_epoch(self._epoch)
+            if hasattr(self._base_dataset, "set_epoch"):
+                # Streaming datasets (training-style) support this
+                self._base_dataset.set_epoch(self._epoch)
+            else:
+                # Non‑streaming eval dataset: just reshuffle (optional) and restart
+                self._base_dataset = self._base_dataset.shuffle(seed=self._epoch)
             self._iterator = iter(self._base_dataset)
             return next(self._iterator)
+
+    # @endpoint
+    # async def sample(self) -> dict[str, str] | None:
+    #     try:
+    #         sample = next(self._iterator)
+
+    #         record_metric("eval_dataset/sample/count_samples_generated", 1, Reduce.SUM)
+    #         record_metric(
+    #             "eval_dataset/sample/avg_sample_len",
+    #             len(sample["request"]),
+    #             Reduce.MEAN,
+    #         )
+    #         record_metric("eval_dataset/sample/current_epoch", self._epoch, Reduce.MAX)
+
+    #         return sample
+    #     except StopIteration:
+    #         # # Restart iterator for next epoch with reshuffling
+    #         # self._epoch += 1
+    #         # print(
+    #         #     f"Dataset epoch {self._epoch - 1} completed. Starting epoch {self._epoch}"
+    #         # )
+    #         # self._base_dataset.set_epoch(self._epoch)
+    #         # self._iterator = iter(self._base_dataset)
+    #         # return next(self._iterator)
+    #         # Restart iterator for next epoch with reshuffling / epoch control
+    #         self._epoch += 1
+    #         print(
+    #             f"Dataset epoch {self._epoch - 1} completed. Starting epoch {self._epoch}"
+    #         )
+    #         if hasattr(self._base_dataset, "set_epoch"):
+    #             self._base_dataset.set_epoch(self._epoch)
+    #         self._iterator = iter(self._base_dataset)
+    #         return next(self._iterator)
 
     @endpoint
     async def pad_token(self):
