@@ -22,9 +22,18 @@ class MathReward:
 
         # Look for answer in <answer></answer> tags
         answer_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
-
+        boxed_match = re.search(r"\\boxed\{(.*?)\}", response, re.DOTALL)
+        
         if answer_match:
             model_answer = self._to_float(answer_match.group(1).strip())
+            if (
+                model_answer is not None
+                and abs(target_number - model_answer) < self.tolerance
+            ):
+                return 1.0  # Correct answer
+        # Look for answer in \boxed{...}
+        if boxed_match:
+            model_answer = self._to_float(boxed_match.group(1).strip())
             if (
                 model_answer is not None
                 and abs(target_number - model_answer) < self.tolerance
