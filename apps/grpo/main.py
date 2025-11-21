@@ -138,6 +138,7 @@ def simple_grpo_loss(
     return loss
 
 
+import re
 @dataclass
 class RewardActor(ForgeActor):
 
@@ -176,11 +177,24 @@ class RewardActor(ForgeActor):
                 reward,
                 Reduce.MEAN,
             )
+            
+            answer_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
+            record_metric(
+                f"reward/evaluate_response/answer_tags_present",
+                1 if answer_match else 0,
+                Reduce.SUM,
+            )
 
             record_metric(
                 f"reward/evaluate_response/count_{reward_fn_name}_calls",
                 1,
                 Reduce.SUM,
+            )
+
+            record_metric(
+                f"reward/evaluate_response/length_{reward_fn_name}_calls",
+                len(response),
+                Reduce.MEAN,
             )
 
         avg_reward = total_rewards / len(self.reward_functions)
@@ -288,6 +302,11 @@ class EvalDatasetActor(ForgeActor):
     streaming: bool = True
     model: str = "Qwen/Qwen3-1.7B" # will be overriden
     num_steps_until_eval: int = 1000
+    # Optional eval controls
+    num_eval_samples: int = 1
+    num_eval_completions: int | None = None
+    pass_k: int | None = num_eval_completions
+    pass_k_success_threshold: float = 1.0
 
     @endpoint
     async def setup(self):
@@ -461,7 +480,8 @@ async def main(cfg: DictConfig):
             t.step("policy_generation")
 
             # DEBUG: print out sample model generations
-            # print("\n--- Rollout Debug ---")
+            print("\n--- Rollout Debug ---")
+            print("Rollout iteration:", rollout_count)
             # print(f"Prompt:\n{prompt}")
             # for i, r in enumerate(responses):
             #     if i == 0:
@@ -516,35 +536,87 @@ async def main(cfg: DictConfig):
 
     async def continuous_training():
         training_step = 0
+        last_eval_step = -1
         restart_tracer = True  # Flag to control when to restart tracer
 
         while max_steps == -1 or training_step < max_steps:
             # Restart tracer when needed (initial start or after completing a training step)
             # Otherwise, we cannot measure time waiting for buffer
 
-            # TODO: implement eval loop during training
-            if training_step % cfg.eval_dataset.num_steps_until_eval == 0:
+            # Eval only once per configured interval, and only after at least one train step
+            should_eval = (
+                training_step > 0
+                and training_step != last_eval_step
+                and training_step % cfg.eval_dataset.num_steps_until_eval == 0
+            )
+            if should_eval:
+                last_eval_step = training_step
                 print(f"On step {training_step}, evaluation run every {cfg.eval_dataset.num_steps_until_eval} steps, running evaluation...")
-                pad_id = await eval_dataloader.pad_token.call_one()
-                sample = await eval_dataloader.sample.call_one()
-                if sample is None:
-                    print("Eval Dataloader is empty, stopping evaluation")
-                    return
-                prompt, target = sample["request"], sample["target"]
-                responses: list[Completion] = await policy.generate.route(prompt)
+                num_eval_samples = getattr(cfg.eval_dataset, "num_eval_samples", 2)
+                for eval_idx in range(num_eval_samples):
+                    sample = await eval_dataloader.sample.call_one()
+                    if sample is None:
+                        print("Eval Dataloader is empty, stopping evaluation")
+                        return
+                    prompt, target = sample["request"], sample["target"]
+                    eval_num_completions = getattr(
+                        cfg.eval_dataset, "num_eval_completions", None
+                    )
+                    generate_kwargs = (
+                        {"sampling_params": {"n": eval_num_completions}}
+                        if eval_num_completions is not None
+                        else {}
+                    )
+                    responses: list[Completion] = await policy.generate.route(
+                        prompt, **generate_kwargs
+                    )
 
-                # EVAL: print out sample model generations
-                print("\n--- Rollout Debug ---")
-                print(f"Prompt:\n{prompt}")
-                for i, r in enumerate(responses):
-                    if i == 0:
-                        print(f"\nResponse {i+1}:\n{r.text}")
-                print("--------------------\n")
+                    # EVAL: print out sample model generations
+                    print("\n--- Rollout Debug ---")
+                    print(f"[Eval {eval_idx+1}/{num_eval_samples}] Prompt:\n{prompt}")
 
-                eval_reward = await reward_actor.evaluate_response.route(
-                    prompt=prompt, response=responses[0].text, target=target
-                )
-                print(f"Eval Reward: {eval_reward}")
+                    print("--------------------\n")
+
+                    # pass@k evaluation: score up to k sampled completions and report best
+                    eval_pass_k = getattr(cfg.eval_dataset, "pass_k", None)
+                    eval_pass_k = eval_pass_k or len(responses)
+                    k = min(eval_pass_k, len(responses))
+                    rewards = await asyncio.gather(
+                        *[
+                            reward_actor.evaluate_response.route(
+                                prompt=prompt, response=r.text, target=target
+                            )
+                            for r in responses[:k]
+                        ]
+                    )
+                    best_reward = max(rewards) if rewards else float("-inf")
+                    success_threshold = getattr(
+                        cfg.eval_dataset, "pass_k_success_threshold", 1.0
+                    )
+                    pass_at_k_success = best_reward >= success_threshold
+                    print(
+                        f"Eval {eval_idx+1}/{num_eval_samples} pass@{k}: "
+                        f"{'SUCCESS' if pass_at_k_success else 'FAIL'}; "
+                        f"best reward {best_reward:.3f}; rewards={rewards}"
+                    )
+
+                    lengths = [len(r.text) for r in responses]
+                    avg_len = sum(lengths) / len(lengths) if lengths else 0.0
+                    record_metric(
+                        "eval/validate_model/length_eval_calls",
+                        avg_len,
+                        Reduce.MEAN,
+                    )
+                    record_metric(
+                        "eval/validate_model/best_reward",
+                        best_reward,
+                        Reduce.MEAN,
+                    )
+                    record_metric(
+                        "eval/validate_model/pass_at_k_success",
+                        int(pass_at_k_success),
+                        Reduce.MEAN,
+                    )
 
 
             if restart_tracer:

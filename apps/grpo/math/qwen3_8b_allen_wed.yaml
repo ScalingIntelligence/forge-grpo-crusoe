@@ -17,7 +17,7 @@ metric_logging:
   wandb:
     entity: forge_scaling_intelligence_lab
     project: forge_grpo
-    name: qwen3-8b-allen-wed-math-slurm
+    name: qwen3-8b-allen-wed-math-slurm-hangook
     group: qwen3-polaris-tests
     tags: ["qwen3", "8b", "polaris", "aime","grpo"]
     logging_mode: global_reduce
@@ -40,7 +40,10 @@ eval_dataset:
   data_split: "test"
   streaming: false
   model: ${model}
-  num_steps_until_eval: 50
+  num_steps_until_eval: 2
+  num_eval_completions: 2
+  num_eval_samples: 2
+  pass_k: 2
 
 # Policy configuration
 policy:

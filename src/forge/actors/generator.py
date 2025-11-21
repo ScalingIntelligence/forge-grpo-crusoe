@@ -120,6 +120,16 @@ class Generator(ForgeActor):
             self.use_dcp_for_weight_sync = not rdma_available()
         logger.debug(f"{self.use_dcp_for_weight_sync=}")
 
+    def _resolve_sampling_params(
+        self, sampling_params: SamplingParams | Mapping | None
+    ) -> SamplingParams:
+        """Return per-call sampling params, falling back to configured defaults."""
+        if sampling_params is None:
+            return self.sampling_params
+        if isinstance(sampling_params, Mapping):
+            return SamplingParams.from_optional(**sampling_params)
+        return sampling_params
+
     @endpoint
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
@@ -287,12 +297,19 @@ class Generator(ForgeActor):
         return state_dict
 
     @endpoint
-    async def generate(self, prompt: str, *, priority: int = 0) -> list[Completion]:
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        priority: int = 0,
+        sampling_params: SamplingParams | Mapping | None = None,
+    ) -> list[Completion]:
         """Generate a response for the given prompt
 
         Args:
             prompt (str): The prompt to generate a response for.
             priority (int, optional): The priority of the request. Defaults to 0.
+            sampling_params (SamplingParams | Mapping, optional): Optional sampling params override for this call.
 
         Returns:
             list[Completion]: n completions from vLLM based on your prompt.
@@ -304,9 +321,11 @@ class Generator(ForgeActor):
         self.request_id += 1 % sys.maxsize
         request_id = str(self.request_id)
 
+        # Allow per-call override; fall back to default sampling params
+        params = self._resolve_sampling_params(sampling_params)
         tokenization_kwargs = {}
         # TODO: add truncation support https://github.com/vllm-project/vllm/issues/4507
-        truncate_prompt_tokens = self.sampling_params.truncate_prompt_tokens
+        truncate_prompt_tokens = params.truncate_prompt_tokens
         _validate_truncation_size(
             self.vllm_config.model_config.max_model_len,
             truncate_prompt_tokens,
@@ -315,7 +334,7 @@ class Generator(ForgeActor):
         prompt_str, request = self.processor.process_inputs(
             request_id=request_id,
             prompt={"prompt": prompt},
-            params=self.sampling_params,
+            params=params,
             arrival_time=None,
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=None,
@@ -331,14 +350,14 @@ class Generator(ForgeActor):
             await self.request_lock.wait_for(lambda: self.accepting_requests)
 
             # Explicitly keeping the redundant logic to make it easier to pick up vLLM changes
-            if (num_samples := self.sampling_params.n) == 1:
+            if (num_samples := params.n) == 1:
                 self.output_processor.add_request(request, prompt_str, None, 0)
                 request, _ = self._preprocess_add_request(request)
                 request_fut = asyncio.Future()
                 self.requests[request_id] = (None, request_fut)
                 self.scheduler.add_request(request)
             else:
-                parent_req = ParentRequest(request_id, self.sampling_params)
+                parent_req = ParentRequest(request_id, params)
                 for idx in range(num_samples):
                     # Note: `get_child_info` mutates ParentRequest to track the
                     # generated child request

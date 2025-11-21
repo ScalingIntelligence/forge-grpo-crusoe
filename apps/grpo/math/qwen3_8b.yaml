@@ -36,7 +36,7 @@ eval_dataset:
   data_split: "test"
   streaming: false
   model: ${model}
-  num_steps_until_eval: 50
+  num_steps_until_eval: 2
 
 
 # Policy configuration
@@ -46,7 +46,7 @@ policy:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
     enforce_eager: false
-    gpu_memory_utilization: 0.4
+    gpu_memory_utilization: 0.6
   sampling_params:  # https://docs.vllm.ai/en/v0.10.0/api/vllm/sampling_params.html#vllm.sampling_params.SamplingParams
     n: ${group_size}
     max_tokens: ${max_res_tokens}
