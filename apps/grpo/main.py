@@ -417,7 +417,6 @@ async def main(cfg: DictConfig):
 
     (
         dataloader,
-        eval_dataloader,
         policy,
         trainer,
         replay_buffer,
@@ -426,7 +425,6 @@ async def main(cfg: DictConfig):
         reward_actor,
     ) = await asyncio.gather(
         DatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.dataset),
-        EvalDatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.eval_dataset), # eval dataset
         Policy.options(**cfg.services.policy).as_service(**cfg.policy),
         TitanTrainer.options(**cfg.actors.trainer).as_actor(
             **cfg.trainer, loss=simple_grpo_loss
@@ -440,6 +438,9 @@ async def main(cfg: DictConfig):
             reward_functions=[MathReward(), ThinkingReward()]
         ),
     )
+
+    if cfg.dataset:
+        eval_dataloader = EvalDatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.eval_dataset) # eval dataset
 
     # Set max_steps to the configured value, or -1 if not specified or Null
     max_steps = cfg.trainer.training.steps or -1
@@ -545,7 +546,8 @@ async def main(cfg: DictConfig):
 
             # Eval only once per configured interval, and only after at least one train step
             should_eval = (
-                training_step > 0
+                getattr(cfg, "eval_dataset", None) is not None
+                and training_step > 0
                 and training_step != last_eval_step
                 and training_step % cfg.eval_dataset.num_steps_until_eval == 0
             )
