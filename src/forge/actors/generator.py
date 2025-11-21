@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 from collections.abc import Mapping
-from copy import copy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -123,11 +123,20 @@ class Generator(ForgeActor):
     def _resolve_sampling_params(
         self, sampling_params: SamplingParams | Mapping | None
     ) -> SamplingParams:
-        """Return per-call sampling params, falling back to configured defaults."""
+        """Return per-call sampling params, falling back to configured defaults.
+
+        Mapping overrides are merged onto a copy of the default sampling params so
+        we don't drop defaults like max_tokens when only `n` is provided.
+        """
         if sampling_params is None:
             return self.sampling_params
+
         if isinstance(sampling_params, Mapping):
-            return SamplingParams.from_optional(**sampling_params)
+            merged_params = deepcopy(self.sampling_params)
+            for k, v in sampling_params.items():
+                setattr(merged_params, k, v)
+            return merged_params
+
         return sampling_params
 
     @endpoint

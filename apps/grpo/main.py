@@ -568,13 +568,14 @@ async def main(cfg: DictConfig):
                         else {}
                     )
                     responses: list[Completion] = await policy.generate.route(
-                        prompt, **generate_kwargs
+                        prompt, sampling_params={"n": eval_num_completions}
                     )
 
                     # EVAL: print out sample model generations
                     print("\n--- Rollout Debug ---")
                     print(f"[Eval {eval_idx+1}/{num_eval_samples}] Prompt:\n{prompt}")
-
+                    for i, r in enumerate(responses[:3]):
+                        print(f"\nResponse {i+1}:\n{r.text}")
                     print("--------------------\n")
 
                     # pass@k evaluation: score up to k sampled completions and report best
@@ -605,7 +606,7 @@ async def main(cfg: DictConfig):
                     record_metric(
                         "eval/validate_model/length_eval_calls",
                         avg_len,
-                        Reduce.MEAN,
+                        Reduce.SUM,
                     )
                     record_metric(
                         "eval/validate_model/best_reward",
