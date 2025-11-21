@@ -439,7 +439,7 @@ async def main(cfg: DictConfig):
         ),
     )
 
-    if cfg.dataset:
+    if getattr(cfg, "eval_dataset", None) is not None:
         eval_dataloader = EvalDatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.eval_dataset) # eval dataset
 
     # Set max_steps to the configured value, or -1 if not specified or Null
@@ -625,6 +625,7 @@ async def main(cfg: DictConfig):
             if restart_tracer:
                 t = Tracer("main_perf/continuous_training")
                 t.start()
+                step_start = time.perf_counter() # begin timinng train step
                 restart_tracer = False
 
             batch = await replay_buffer.sample.call_one(
@@ -649,6 +650,9 @@ async def main(cfg: DictConfig):
                 if training_step >= 2:
                     await drop_weights(training_step - 1)
                     t.step("drop_weights")
+
+                step_duration = time.perf_counter() - step_start # measure step time and log on wandb
+                record_metric("timing/train/step_sec", step_duration, Reduce.MEAN)
 
                 t.stop()
                 restart_tracer = True
