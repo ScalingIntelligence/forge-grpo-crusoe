@@ -327,10 +327,32 @@ async def run(cfg: DictConfig) -> None:
         provisioner = await init_provisioner()
 
 
+    run_config_dict = OmegaConf.to_container(cfg, resolve=True)
     process_cfg = cfg.pop("processes")
 
     # Initialize metric logger in main process
     metric_logging_cfg = cfg.get("metric_logging", {})
+    if OmegaConf.is_config(metric_logging_cfg):
+        metric_logging_cfg = OmegaConf.to_container(metric_logging_cfg, resolve=True)
+    elif isinstance(metric_logging_cfg, dict):
+        metric_logging_cfg = dict(metric_logging_cfg)
+    else:
+        metric_logging_cfg = {}
+
+    wandb_cfg = metric_logging_cfg.get("wandb")
+    if wandb_cfg is not None:
+        if not isinstance(wandb_cfg, dict):
+            wandb_cfg = dict(wandb_cfg)
+        user_wandb_config = wandb_cfg.get("config")
+        if user_wandb_config is None:
+            merged_wandb_config = run_config_dict
+        elif isinstance(user_wandb_config, dict):
+            merged_wandb_config = {**run_config_dict, **user_wandb_config}
+        else:
+            merged_wandb_config = run_config_dict
+        wandb_cfg["config"] = merged_wandb_config
+        metric_logging_cfg["wandb"] = wandb_cfg
+
     mlogger = await get_or_create_metric_logger(process_name="Controller")
     await mlogger.init_backends.call_one(metric_logging_cfg)
 

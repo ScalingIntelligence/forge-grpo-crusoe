@@ -36,7 +36,7 @@ from forge.types import LauncherConfig, ProvisionerConfig
 from forge.util.config import parse
 from forge.util.ops import compute_logprobs
 from monarch.actor import endpoint
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
@@ -391,14 +391,49 @@ async def main(cfg: DictConfig):
         provisioner = await init_provisioner()
 
     metric_logging_cfg = cfg.get("metric_logging", {})
+    run_config_dict = OmegaConf.to_container(cfg, resolve=True)
+    if OmegaConf.is_config(metric_logging_cfg):
+        metric_logging_cfg = OmegaConf.to_container(metric_logging_cfg, resolve=True)
+    elif isinstance(metric_logging_cfg, dict):
+        metric_logging_cfg = dict(metric_logging_cfg)
+    else:
+        metric_logging_cfg = {}
+
+    wandb_cfg = metric_logging_cfg.get("wandb")
+    if wandb_cfg is not None:
+        if not isinstance(wandb_cfg, dict):
+            wandb_cfg = dict(wandb_cfg)
+        user_wandb_config = wandb_cfg.get("config")
+        if user_wandb_config is None:
+            merged_wandb_config = run_config_dict
+        elif isinstance(user_wandb_config, dict):
+            merged_wandb_config = {**run_config_dict, **user_wandb_config}
+        else:
+            merged_wandb_config = run_config_dict
+        wandb_cfg["config"] = merged_wandb_config
+        metric_logging_cfg["wandb"] = wandb_cfg
+
     mlogger = await get_or_create_metric_logger(process_name="Controller")
     await mlogger.init_backends.call_one(metric_logging_cfg)
 
     # ---- Setup services ---- #
 
+    dataloader = await DatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.dataset)
+
+    eval_dataset_cfg = cfg.get("eval_dataset", None)
+    eval_dataloader = None
+    eval_num_steps_until_eval: int | None = None
+    if eval_dataset_cfg is not None:
+        eval_dataloader = await EvalDatasetActor.options(**cfg.actors.dataset).as_actor(
+            **eval_dataset_cfg
+        )
+        eval_steps_value = eval_dataset_cfg.get("num_steps_until_eval", 1000)
+        try:
+            eval_num_steps_until_eval = int(eval_steps_value)
+        except (TypeError, ValueError):
+            eval_num_steps_until_eval = 1000
+
     (
-        dataloader,
-        eval_dataloader,
         policy,
         trainer,
         replay_buffer,
@@ -406,8 +441,6 @@ async def main(cfg: DictConfig):
         ref_model,
         reward_actor,
     ) = await asyncio.gather(
-        DatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.dataset),
-        EvalDatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.eval_dataset), # eval dataset
         Policy.options(**cfg.services.policy).as_service(**cfg.policy),
         TitanTrainer.options(**cfg.actors.trainer).as_actor(
             **cfg.trainer, loss=simple_grpo_loss
@@ -523,8 +556,15 @@ async def main(cfg: DictConfig):
             # Otherwise, we cannot measure time waiting for buffer
 
             # TODO: implement eval loop during training
-            if training_step % cfg.eval_dataset.num_steps_until_eval == 0:
-                print(f"On step {training_step}, evaluation run every {cfg.eval_dataset.num_steps_until_eval} steps, running evaluation...")
+            if (
+                eval_dataloader is not None
+                and eval_num_steps_until_eval
+                and eval_num_steps_until_eval > 0
+                and training_step % eval_num_steps_until_eval == 0
+            ):
+                print(
+                    f"On step {training_step}, evaluation run every {eval_num_steps_until_eval} steps, running evaluation..."
+                )
                 pad_id = await eval_dataloader.pad_token.call_one()
                 sample = await eval_dataloader.sample.call_one()
                 if sample is None:
