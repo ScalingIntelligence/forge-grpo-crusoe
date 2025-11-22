@@ -36,7 +36,7 @@ from forge.types import LauncherConfig, ProvisionerConfig
 from forge.util.config import parse
 from forge.util.ops import compute_logprobs
 from monarch.actor import endpoint
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 
@@ -184,6 +184,12 @@ class RewardActor(ForgeActor):
                 1 if answer_match else 0,
                 Reduce.SUM,
             )
+            boxed_match = re.search(r"\\boxed\{(.*?)\}", response, re.DOTALL)
+            record_metric(
+                f"reward/evaluate_response/box_tags_present",
+                1 if boxed_match else 0,
+                Reduce.SUM,
+            )
 
             record_metric(
                 f"reward/evaluate_response/count_{reward_fn_name}_calls",
@@ -233,7 +239,7 @@ class DatasetActor(ForgeActor):
             system_prompt = """
             You are a math expert and your job is to solve the following problem.
             Put all your scratchpad work between <think> and </think> tags.
-            Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
+            Your final answer should be boxed with \boxed.
             Please output your answer in latex, without dollar signs, if it is an expression.
             """
             request: str = sample["problem"]
@@ -318,7 +324,7 @@ class EvalDatasetActor(ForgeActor):
             system_prompt = """
             You are a math expert and your job is to solve the following problem.
             Put all your scratchpad work between <think> and </think> tags.
-            Your final answer should be between <answer> and </answer> tags otherwise it will not be scored.
+            Your final answer should be boxed with \boxed.
             Please output your answer in latex, without dollar signs, if it is an expression.
             """
             request: str = sample["question"]
@@ -448,10 +454,46 @@ async def main(cfg: DictConfig):
         provisioner = await init_provisioner()
 
     metric_logging_cfg = cfg.get("metric_logging", {})
+    run_config_dict = OmegaConf.to_container(cfg, resolve=True)
+    if OmegaConf.is_config(metric_logging_cfg):
+        metric_logging_cfg = OmegaConf.to_container(metric_logging_cfg, resolve=True)
+    elif isinstance(metric_logging_cfg, dict):
+        metric_logging_cfg = dict(metric_logging_cfg)
+    else:
+        metric_logging_cfg = {}
+
+    wandb_cfg = metric_logging_cfg.get("wandb")
+    if wandb_cfg is not None:
+        if not isinstance(wandb_cfg, dict):
+            wandb_cfg = dict(wandb_cfg)
+        user_wandb_config = wandb_cfg.get("config")
+        if user_wandb_config is None:
+            merged_wandb_config = run_config_dict
+        elif isinstance(user_wandb_config, dict):
+            merged_wandb_config = {**run_config_dict, **user_wandb_config}
+        else:
+            merged_wandb_config = run_config_dict
+        wandb_cfg["config"] = merged_wandb_config
+        metric_logging_cfg["wandb"] = wandb_cfg
+
     mlogger = await get_or_create_metric_logger(process_name="Controller")
     await mlogger.init_backends.call_one(metric_logging_cfg)
 
     # ---- Setup services ---- #
+    dataloader = await DatasetActor.options(**cfg.actors.dataset).as_actor(**cfg.dataset)
+
+    eval_dataset_cfg = cfg.get("eval_dataset", None)
+    eval_dataloader = None
+    eval_num_steps_until_eval: int | None = None
+    if eval_dataset_cfg is not None:
+        eval_dataloader = await EvalDatasetActor.options(**cfg.actors.dataset).as_actor(
+            **eval_dataset_cfg
+        )
+        eval_steps_value = eval_dataset_cfg.get("num_steps_until_eval", 1000)
+        try:
+            eval_num_steps_until_eval = int(eval_steps_value)
+        except (TypeError, ValueError):
+            eval_num_steps_until_eval = 1000
 
     (
         dataloader,
@@ -663,7 +705,7 @@ async def main(cfg: DictConfig):
             if restart_tracer:
                 t = Tracer("main_perf/continuous_training")
                 t.start()
-                step_start = time.perf_counter() # begin timinng train step
+                step_start = time.perf_counter() # begin timing train step
                 restart_tracer = False
 
             batch = await replay_buffer.sample.call_one(
